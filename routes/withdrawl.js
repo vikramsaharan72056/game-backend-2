@@ -1,262 +1,139 @@
 const express = require('express');
-const connection = require('../config/db'); // Ensure database connection is configured
+const mongoose = require('mongoose');
+const Withdrawl = require('../models/Withdrawl'); // Import Withdrawl model
+const User = require('../models/User'); // Import User model
 const router = express.Router();
 
 // Create a new withdrawal entry and deduct balance from the wallet
 router.post('/withdrawl', async (req, res) => {
-  console.log("api called");
-  const { userId, balance, cryptoname, status } = req.body;
-  console.log(userId,balance,cryptoname,status);
+    const { userId, balance, cryptoname, status } = req.body;
 
-  if (!userId || !cryptoname || !balance || balance <= 0) {
-    console.log("I am in");
-    return res.status(400).json({ error: 'Invalid input. userId, cryptoname, and a positive balance are required.' });
-  }
-  console.log("I am here");
+    if (!userId || !cryptoname || !balance || balance <= 0) {
+        return res.status(400).json({ error: 'Invalid input. userId, cryptoname, and a positive balance are required.' });
+    }
 
-  try {
-    // Start a transaction to ensure atomicity
-    connection.beginTransaction((err,results) => {
-      if (err) {
-        console.error('Transaction error:', err);
-        return res.status(500).json({ error: 'Transaction initialization failed' });
-      }else{
-        console.log(results);
-      }
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-
-      // Deduct the balance from the wallet
-      const deductBalanceQuery = `
-        UPDATE wallet
-        SET balance = balance - ?
-        WHERE userId = ? AND cryptoname = ? 
-      `;
-      const response = connection.query(
-        deductBalanceQuery,
-        [balance, userId, cryptoname, balance],
-        (err, results) => {
-          if (err) {
-            console.error('Database error during balance deduction:', err);
-            return connection.rollback(() => {
-              res.status(500).json({ error: 'Error updating wallet balance' });
-            });
-          }
-          
-
-          if (results.affectedRows === 0) {
-            return connection.rollback(() => {
-              res.status(400).json({ error: 'Insufficient balance or wallet entry not found' });
-            });
-          }
-
-          // Insert the withdrawal entry
-          const createWithdrawalQuery = `
-            INSERT INTO withdrawl (userId, balance, cryptoname, status)
-            VALUES (?, ?, ?, ?)
-          `;
-          connection.query(
-            createWithdrawalQuery,
-            [userId, balance, cryptoname, status || 0],
-            (err, withdrawalResults) => {
-              if (err) {
-                console.error('Database error during withdrawal creation:', err);
-                return connection.rollback(() => {
-                  res.status(500).json({ error: 'Error creating withdrawal entry' });
-                });
-              }
-
-              // Commit the transaction
-              connection.commit((err) => {
-                if (err) {
-                  console.error('Transaction commit error:', err);
-                  return connection.rollback(() => {
-                    res.status(500).json({ error: 'Transaction commit failed' });
-                  });
-                }
-
-                res.status(201).json({
-                  message: 'Withdrawal entry created successfully and balance deducted',
-                  id: withdrawalResults.insertId,
-                });
-              });
-            }
-          );
+    try {
+        // Find the user and their wallet
+        const user = await User.findById(userId).session(session);
+        if (!user) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'User not found' });
         }
-      );
-    });
-  } catch (error) {
-    console.error('Error creating withdrawal entry:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+
+        // Check if the user has sufficient balance
+        const walletEntry = user.wallet.find(w => w.cryptoname === cryptoname);
+        if (!walletEntry || walletEntry.balance < balance) {
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'Insufficient balance or wallet entry not found' });
+        }
+
+        // Deduct balance
+        walletEntry.balance -= balance;
+        await user.save({ session });
+
+        // Create withdrawal entry
+        const newWithdrawl = new Withdrawl({ userId, balance, cryptoname, status: status || 0 });
+        await newWithdrawl.save({ session });
+
+        // Commit transaction
+        await session.commitTransaction();
+        res.status(201).json({ message: 'Withdrawal entry created successfully and balance deducted' });
+
+    } catch (error) {
+        await session.abortTransaction();
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        session.endSession();
+    }
 });
 
-
-// Get all withdrawal entries with username from the user table
-
-
+// Get all withdrawal entries
 router.get('/withdrawl', async (req, res) => {
-  try {
-    const query = 'SELECT * FROM withdrawl';
-    connection.query(query, (err, results) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({ error: 'Database query error' });
-      }
-      res.json(results);
-    });
-  } catch (error) {
-    console.error('Error fetching withdrawal entries:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+    try {
+        const withdrawls = await Withdrawl.find().populate('userId', 'username email');
+        res.json(withdrawls);
+    } catch (error) {
+        res.status(500).json({ error: 'Error fetching withdrawal entries' });
+    }
 });
 
 // Get a single withdrawal entry by ID
 router.get('/withdrawl/:id', async (req, res) => {
-  const withdrawlId = req.params.id;
+    try {
+        const withdrawl = await Withdrawl.findById(req.params.id).populate('userId', 'username email');
+        if (!withdrawl) return res.status(404).json({ error: 'Withdrawal entry not found' });
 
-  try {
-    const query = 'SELECT * FROM withdrawl WHERE id = ?';
-    connection.query(query, [withdrawlId], (err, results) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({ error: 'Database query error' });
-      }
-      if (results.length === 0) {
-        return res.status(404).json({ error: 'Withdrawal entry not found' });
-      }
-      res.json(results[0]);
-    });
-  } catch (error) {
-    console.error('Error fetching withdrawal entry:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+        res.json(withdrawl);
+    } catch (error) {
+        res.status(500).json({ error: 'Error fetching withdrawal entry' });
+    }
 });
-
-
 
 // Update a withdrawal entry by ID
 router.put('/withdrawl/:id', async (req, res) => {
-  const withdrawlId = req.params.id;
-  const { balance, cryptoname, status } = req.body;
+    const { balance, cryptoname, status } = req.body;
 
-  if (!balance || !cryptoname || status === undefined) {
-    return res.status(400).json({ error: 'Balance, cryptoname, and status are required fields.' });
-  }
+    if (!balance || !cryptoname || status === undefined) {
+        return res.status(400).json({ error: 'Balance, cryptoname, and status are required fields.' });
+    }
 
-  try {
-    // Start a transaction to ensure consistency
-    connection.beginTransaction((err) => {
-      if (err) {
-        console.error('Transaction error:', err);
-        return res.status(500).json({ error: 'Transaction initialization failed' });
-      }
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-      // Fetch the current status of the withdrawal
-      const fetchQuery = `SELECT status FROM withdrawl WHERE id = ?`;
-      connection.query(fetchQuery, [withdrawlId], (err, results) => {
-        if (err) {
-          console.error('Database error:', err);
-          return connection.rollback(() => {
-            res.status(500).json({ error: 'Database query error' });
-          });
+    try {
+        const withdrawl = await Withdrawl.findById(req.params.id).session(session);
+        if (!withdrawl) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'Withdrawal entry not found' });
         }
 
-        if (results.length === 0) {
-          return connection.rollback(() => {
-            res.status(404).json({ error: 'Withdrawal entry not found' });
-          });
+        const user = await User.findById(withdrawl.userId).session(session);
+        if (!user) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'User not found' });
         }
 
-        const previousStatus = results[0].status;
-
-        // If the previous status is not 2 (rejected) and the new status is 2, refund the balance
-        if (previousStatus !== 2 && status === 2) {
-          const refundBalanceQuery = `
-            UPDATE wallet
-            SET balance = balance + ?
-            WHERE userId = (SELECT userId FROM withdrawl WHERE id = ?) AND cryptoname = ?
-          `;
-          connection.query(
-            refundBalanceQuery,
-            [balance, withdrawlId, cryptoname],
-            (err, refundResults) => {
-              if (err) {
-                console.error('Error refunding balance:', err);
-                return connection.rollback(() => {
-                  res.status(500).json({ error: 'Error refunding wallet balance' });
-                });
-              }
-
-              console.log('Balance refunded successfully:', refundResults);
-            }
-          );
+        const walletEntry = user.wallet.find(w => w.cryptoname === cryptoname);
+        if (!walletEntry) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'Cryptocurrency not found in wallet' });
         }
 
-        // Update the withdrawal entry
-        const updateQuery = `
-          UPDATE withdrawl
-          SET balance = ?, cryptoname = ?, status = ?
-          WHERE id = ?
-        `;
-        connection.query(
-          updateQuery,
-          [balance, cryptoname, status, withdrawlId],
-          (err, updateResults) => {
-            if (err) {
-              console.error('Error updating withdrawal entry:', err);
-              return connection.rollback(() => {
-                res.status(500).json({ error: 'Error updating withdrawal entry' });
-              });
-            }
+        if (withdrawl.status !== 2 && status === 2) {
+            // Refund balance if status is updated to "Rejected"
+            walletEntry.balance += balance;
+            await user.save({ session });
+        }
 
-            if (updateResults.affectedRows === 0) {
-              return connection.rollback(() => {
-                res.status(404).json({ error: 'Withdrawal entry not found' });
-              });
-            }
+        withdrawl.balance = balance;
+        withdrawl.cryptoname = cryptoname;
+        withdrawl.status = status;
+        await withdrawl.save({ session });
 
-            // Commit the transaction
-            connection.commit((err) => {
-              if (err) {
-                console.error('Transaction commit error:', err);
-                return connection.rollback(() => {
-                  res.status(500).json({ error: 'Transaction commit failed' });
-                });
-              }
+        await session.commitTransaction();
+        res.json({ message: 'Withdrawal entry updated successfully' });
 
-              res.json({ message: 'Withdrawal entry updated successfully' });
-            });
-          }
-        );
-      });
-    });
-  } catch (error) {
-    console.error('Error updating withdrawal entry:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+    } catch (error) {
+        await session.abortTransaction();
+        res.status(500).json({ error: 'Error updating withdrawal entry' });
+    } finally {
+        session.endSession();
+    }
 });
-
 
 // Delete a withdrawal entry by ID
 router.delete('/withdrawl/:id', async (req, res) => {
-  const withdrawlId = req.params.id;
+    try {
+        const withdrawl = await Withdrawl.findByIdAndDelete(req.params.id);
+        if (!withdrawl) return res.status(404).json({ error: 'Withdrawal entry not found' });
 
-  try {
-    const query = 'DELETE FROM withdrawl WHERE id = ?';
-    connection.query(query, [withdrawlId], (err, results) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({ error: 'Database query error' });
-      }
-      if (results.affectedRows === 0) {
-        return res.status(404).json({ error: 'Withdrawal entry not found' });
-      }
-      res.json({ message: 'Withdrawal entry deleted successfully' });
-    });
-  } catch (error) {
-    console.error('Error deleting withdrawal entry:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+        res.json({ message: 'Withdrawal entry deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'Error deleting withdrawal entry' });
+    }
 });
 
 module.exports = router;

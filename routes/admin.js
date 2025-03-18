@@ -1,73 +1,70 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const Admin = require('../models/Admin');  // Import Admin model
+const User = require('../models/User');    // Import User model
+const Wallet = require('../models/Wallet');// Import Wallet model
 const router = express.Router();
-const connection = require('../config/db'); // Ensure your DB connection is set up
 
 // Admin login
 router.post('/admin-login', async (req, res) => {
-  const { username, password } = req.body;
-  try {
-    const query = "SELECT * FROM admins WHERE username = ?";
-    connection.query(query, [username], async (err, results) => {
-      if (err) return res.status(500).json({ error: 'Database query error' });
-      if (results.length === 0) return res.status(404).json({ error: 'Admin not found' });
+    const { username, password } = req.body;
+    try {
+        const admin = await Admin.findOne({ username });
+        if (!admin) return res.status(404).json({ error: 'Admin not found' });
 
-      const admin = results[0];
-      if (admin.password !== password) return res.status(401).json({ error: 'Invalid credentials' });
+        // Check password
+        const isMatch = password === admin.password;  // This assumes passwords are stored in plain text, which is insecure
+        if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
 
-      const token = jwt.sign({ id: admin.id, isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '1h' });
-      res.json({ token });
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Error logging in admin' });
-  }
+        // Generate JWT token
+        const token = jwt.sign({ id: admin._id, isAdmin: true }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        res.json({ token });
+
+    } catch (error) {
+        res.status(500).json({ error: 'Error logging in admin' });
+    }
 });
 
 // Create a new user
 router.post('/user', async (req, res) => {
-  const { username, email, password, phone, dob } = req.body;
-  const referalCode = "admin"
-  console.log(req.body,"req.body");
+    const { username, email, password, phone, dob } = req.body;
+    const referralCode = "admin";
 
-  try {
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    try {
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert the user into the 'users' table
-    const query = "INSERT INTO users (username, email, password, phone, dob, code) VALUES (?, ?, ?, ?, ?, ?)";
-    connection.query(query, [username, email, hashedPassword, phone, dob, referalCode], (err, results) => {
-      if (err) {
-        console.log(err);
-        return res.status(500).json({ error: 'Database error' });
-      }
+        // Create user
+        const newUser = new User({
+            username,
+            email,
+            password: hashedPassword,
+            phone,
+            dob,
+            code: referralCode
+        });
 
-      // Get the newly created user's ID
-      const userId = results.insertId;
+        const savedUser = await newUser.save();
 
-      // List of cryptocurrencies
-      const cryptocurrencies = ['BTC', 'ETH', 'LTC', 'USDT', 'SOL', 'DOGE', 'BCH', 'XRP', 'TRX', 'EOS', 'INR','CP'];
+        // List of cryptocurrencies
+        const cryptocurrencies = ['BTC', 'ETH', 'LTC', 'USDT', 'SOL', 'DOGE', 'BCH', 'XRP', 'TRX', 'EOS', 'INR', 'CP'];
 
-      // Generate wallet entries for the new user
-      const walletQuery = "INSERT INTO wallet (userId, balance, cryptoname) VALUES ?";
-      const walletValues = cryptocurrencies.map(crypto => [userId, 0, crypto]);
+        // Create wallets for the user
+        const walletEntries = cryptocurrencies.map(crypto => ({
+            userId: savedUser._id,
+            balance: 0,
+            cryptoname: crypto
+        }));
 
-      // Insert wallet entries into the 'wallet' table
-      connection.query(walletQuery, [walletValues], (err, walletResults) => {
-        if (err) {
-          console.log(err);
-          return res.status(500).json({ error: 'Error creating wallet entries' });
-        }
+        await Wallet.insertMany(walletEntries);
 
-        // Respond with a success message
         res.status(201).json({ message: 'User registered and wallet initialized successfully' });
-      });
-    });
-  } catch (error) {
-    console.log(error);
-    res.status(500).json({ error: 'Error registering user' });
-  }
-});
 
+    } catch (error) {
+        console.log(error);
+        res.status(500).json({ error: 'Error registering user' });
+    }
+});
 
 module.exports = router;
