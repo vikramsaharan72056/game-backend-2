@@ -59,6 +59,7 @@ router.post('/addgame', upload.single('image'), async (req, res) => {
 router.put('/updategame/:id', upload.single('image'), async (req, res) => {
     const { name, popularity, description, type } = req.body;
     const image = req.file ? req.file.filename : null;
+    
 
     try {
         const game = await Game.findById(req.params.id);
